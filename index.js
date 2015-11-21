@@ -1,11 +1,9 @@
 'use strict';
-
 var through2 = require('through2');
 var Combine = require('ordered-read-streams');
 var unique = require('unique-stream');
 
 var glob = require('glob');
-var micromatch = require('micromatch');
 var resolveGlob = require('to-absolute-glob');
 var globParent = require('glob-parent');
 var extend = require('extend');
@@ -13,12 +11,17 @@ var extend = require('extend');
 var gs = {
   // Creates a stream for a single glob or filter
   createStream: function(ourGlob, negatives, opt) {
+    function resolveNegatives(negative) {
+      return resolveGlob(negative,opt);
+    }
 
     // Remove path relativity to make globs make sense
     ourGlob = resolveGlob(ourGlob, opt);
+    var ourNegatives = negatives.map(resolveNegatives);
     var ourOpt = extend({}, opt);
     delete ourOpt.root;
 
+    ourOpt.ignore = ourNegatives;
     // Create globbing stuff
     var globber = new glob.Glob(ourGlob, ourOpt);
 
@@ -26,12 +29,12 @@ var gs = {
     var basePath = opt.base || globParent(ourGlob) + '/';
 
     // Create stream and map events from globber to it
-    var stream = through2.obj(opt,
-      negatives.length ? filterNegatives : undefined);
+    var stream = through2.obj(ourOpt);
 
     var found = false;
 
     globber.on('error', stream.emit.bind(stream, 'error'));
+
     globber.once('end', function() {
       if (opt.allowEmpty !== true && !found && globIsSingular(globber)) {
         stream.emit('error',
@@ -40,6 +43,7 @@ var gs = {
 
       stream.end();
     });
+
     globber.on('match', function(filename) {
       found = true;
 
@@ -49,17 +53,7 @@ var gs = {
         path: filename,
       });
     });
-
     return stream;
-
-    function filterNegatives(filename, enc, cb) {
-      var matcha = isMatch.bind(null, filename);
-      if (negatives.every(matcha)) {
-        cb(null, filename); // Pass
-      } else {
-        cb(); // Ignore
-      }
-    }
   },
 
   // Creates a stream for multiple globs or filters
@@ -98,17 +92,11 @@ var gs = {
     delete ourOpt.root;
 
     globs.forEach(function(glob, index) {
-      if (typeof glob !== 'string' && !(glob instanceof RegExp)) {
+      if (typeof glob !== 'string') {
         throw new Error('Invalid glob at index ' + index);
       }
 
       var globArray = isNegative(glob) ? negatives : positives;
-
-      // Create Minimatch instances for negative glob patterns
-      if (globArray === negatives && typeof glob === 'string') {
-        var ourGlob = resolveGlob(glob, opt);
-        glob = micromatch.matcher(ourGlob, ourOpt);
-      }
 
       globArray.push({
         index: index,
@@ -141,27 +129,17 @@ var gs = {
 
     function streamFromPositive(positive) {
       var negativeGlobs = negatives.filter(indexGreaterThan(positive.index))
-        .map(toGlob);
+        .map(toGlob)
+        .map(stripExclamationMark);
       return gs.createStream(positive.glob, negativeGlobs, opt);
     }
   },
 };
 
-function isMatch(file, matcher) {
-  if (typeof matcher === 'function') {
-    return matcher(file.path);
-  }
-  if (matcher instanceof RegExp) {
-    return matcher.test(file.path);
-  }
-}
 
 function isNegative(pattern) {
   if (typeof pattern === 'string') {
     return pattern[0] === '!';
-  }
-  if (pattern instanceof RegExp) {
-    return true;
   }
 }
 
@@ -177,7 +155,6 @@ function toGlob(obj) {
 
 function globIsSingular(glob) {
   var globSet = glob.minimatch.set;
-
   if (globSet.length !== 1) {
     return false;
   }
@@ -185,6 +162,10 @@ function globIsSingular(glob) {
   return globSet[0].every(function isString(value) {
     return typeof value === 'string';
   });
+}
+
+function stripExclamationMark(glob) {
+  return glob.slice(1);
 }
 
 module.exports = gs;
